@@ -13,8 +13,7 @@ public class ScreenshotBlocker extends CordovaPlugin{
     @Override
     public void initialize(CordovaInterface cordova, CordovaWebView webView) {
         super.initialize(cordova, webView);
-        Activity activity = this.cordova.getActivity();
-        activity.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        // Removed the addFlags line from here so it doesn't block globally on startup.
     }
 
     @Override
@@ -40,7 +39,6 @@ public class ScreenshotBlocker extends CordovaPlugin{
             mContext.cordova.getActivity().runOnUiThread(new Runnable() {
                 public void run() {
                     try{
-                        // Allow to make screenshots removing the FLAG_SECURE
                         // Disable the creation of screenshots adding the FLAG_SECURE to the window
                         if(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.HONEYCOMB) {
                             mContext.cordova.getActivity().getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE,
@@ -57,7 +55,5 @@ public class ScreenshotBlocker extends CordovaPlugin{
         else{
             return false;
         }
-
     }
-
 }
