@@ -1,7 +1,7 @@
 {
   "name": "cordova-plugin-prevent-screenshot-coffice",
-  "version": "1.0.2",
-  "description": "Cordova plugin for prevent screenCapture",
+  "version": "1.1.0",
+  "description": "Cordova plugin to control screenshot and screen-capture protection",
   "cordova": {
     "id": "cordova-plugin-prevent-screenshot-coffice",
     "platforms": [
@@ -11,18 +11,18 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/flotrugliocoffice/cordova-plugin-prevent-screenshot-coffice.git"
+    "url": "git+https://github.com/cyruscvc/outsystem-prevent-screenshot.git"
   },
   "author": "Francesco Lo Truglio <flotruglio@cofficegroup.com> (https://www.cofficegroup.com)",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/flotrugliocoffice/cordova-plugin-prevent-screenshot-coffice/issues"
+    "url": "https://github.com/cyruscvc/outsystem-prevent-screenshot/issues"
   },
   "scripts": {
     "version": "replace -s 'version=\"(.+)(?=\">)' 'version=\"'$npm_package_version plugin.xml && git add plugin.xml",
     "postversion": "git push && git push --tags"
   },
-  "homepage": "https://github.com/flotrugliocoffice/cordova-plugin-prevent-screenshot-coffice#readme",
+  "homepage": "https://github.com/cyruscvc/outsystem-prevent-screenshot#readme",
   "keywords": [
     "cordova",
     "screencapture",

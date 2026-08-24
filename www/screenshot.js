@@ -2,14 +2,23 @@ var screenshot = {
   enable: function (successCallback, errorCallback) {
     cordova.exec(successCallback, errorCallback, 'screenshotName', 'enable', []);
   },
-  disable: function (name, title, successCallback, errorCallback) {
-    cordova.exec(null, null, 'screenshotName', 'disable', [name, title]);
+  disable: function (title, message, successCallback, errorCallback) {
+    // Preserve the documented disable(success, error) signature while also
+    // supporting disable(title, message, success, error).
+    if (typeof title === 'function') {
+      errorCallback = message;
+      successCallback = title;
+      title = null;
+      message = null;
+    }
+
+    cordova.exec(successCallback, errorCallback, 'screenshotName', 'disable', [title, message]);
   },
   registerListener : function(callback) {
     cordova.exec(callback, callback, 'screenshotName', 'listen', []);
 
   }
-}
+};
 
 cordova.addConstructor(function () {
   if (!window.plugins) {window.plugins = {};}
