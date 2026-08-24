@@ -1,225 +1,338 @@
 #import "ScreenshotBlocker.h"
-@interface ScreenshotBlocker() {
-    CDVInvokedUrlCommand * _eventCommand;
+#import <QuartzCore/QuartzCore.h>
+
+@interface ScreenshotBlocker () {
+    CDVInvokedUrlCommand *_eventCommand;
 }
+
+@property(nonatomic, assign) BOOL screenshotsBlocked;
+@property(nonatomic, strong) UIImageView *cover;
+@property(nonatomic, strong) UILabel *stopRecordingLabel;
+@property(nonatomic, copy) NSString *recordingTitle;
+@property(nonatomic, copy) NSString *recordingContent;
+
+// iOS does not expose a public screenshot-blocking API. These properties make the
+// secure-text-entry window-layer workaround reversible when enable() is called.
+@property(nonatomic, strong) UITextField *secureTextField;
+@property(nonatomic, weak) UIWindow *protectedWindow;
+@property(nonatomic, strong) CALayer *originalWindowSuperlayer;
+@property(nonatomic, assign) NSUInteger originalWindowLayerIndex;
+
 @end
 
 @implementation ScreenshotBlocker
-UIImageView* cover;
-CustomView* preventedView;
-UIView *secureView;
-BOOL stopRecording = false;
-NSString* title = @"Please Turn Off Screen Recording or Sharing";
-NSString* content = @"Looks like your screen is being recorded or shared. Please turn it off to proceed.";
-UILabel *stopRecordingLabel;
 
 - (void)pluginInitialize {
     NSLog(@"Starting ScreenshotBlocker plugin");
 
-    [[NSNotificationCenter defaultCenter]addObserver:self
-                                            selector:@selector(appDidBecomeActive)
-                                                name:UIApplicationDidBecomeActiveNotification
-                                              object:nil];
-    [[NSNotificationCenter defaultCenter]addObserver:self
-                                            selector:@selector(applicationWillResignActive)
-                                                name:UIApplicationWillResignActiveNotification
-                                              object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(tookScreeshot)
-                                                 name:UIApplicationUserDidTakeScreenshotNotification
-                                               object:nil];
+    self.screenshotsBlocked = NO;
+    self.recordingTitle = @"Please Turn Off Screen Recording or Sharing";
+    self.recordingContent = @"Looks like your screen is being recorded or shared. Please turn it off to proceed.";
 
-    [[NSNotificationCenter defaultCenter]addObserver:self
-                                            selector:@selector(goingBackground)
-                                                name:UIApplicationWillResignActiveNotification
-                                              object:nil];
-
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(screenCaptureStatusChanged)
-                                                 name:kScreenRecordingDetectorRecordingStatusChangedNotification
-                                               object:nil];
-
-    /*
-     userDidTakeScreenshotNotification
-     */
-
+    NSNotificationCenter *notificationCenter = [NSNotificationCenter defaultCenter];
+    [notificationCenter addObserver:self
+                           selector:@selector(appDidBecomeActive)
+                               name:UIApplicationDidBecomeActiveNotification
+                             object:nil];
+    [notificationCenter addObserver:self
+                           selector:@selector(applicationWillResignActive)
+                               name:UIApplicationWillResignActiveNotification
+                             object:nil];
+    [notificationCenter addObserver:self
+                           selector:@selector(tookScreenshot)
+                               name:UIApplicationUserDidTakeScreenshotNotification
+                             object:nil];
+    [notificationCenter addObserver:self
+                           selector:@selector(goingBackground)
+                               name:UIApplicationWillResignActiveNotification
+                             object:nil];
+    [notificationCenter addObserver:self
+                           selector:@selector(screenCaptureStatusChanged)
+                               name:kScreenRecordingDetectorRecordingStatusChangedNotification
+                             object:nil];
 }
 
-- (void)enable:(CDVInvokedUrlCommand *)command
-{
-    CDVPluginResult* pluginResult = nil;
-    stopRecording = false;
-    [secureView removeFromSuperview];
-    [self.viewController.view addSubview:self.webView];
-    secureView = nil;
-    preventedView = nil;
+- (void)enable:(CDVInvokedUrlCommand *)command {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.screenshotsBlocked = NO;
+        [self removeRecordingOverlay];
+        [self restoreWindowProtection];
+        [self sendSuccessForCommand:command];
+    });
 }
--(void)listen:(CDVInvokedUrlCommand*)command {
+
+- (void)listen:(CDVInvokedUrlCommand *)command {
     _eventCommand = command;
 }
 
--(void)disable:(CDVInvokedUrlCommand*)command {
-    NSLog(@"Disable recording");
+- (void)disable:(CDVInvokedUrlCommand *)command {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.recordingTitle = [self stringArgumentAtIndex:0
+                                                  command:command
+                                                 fallback:self.recordingTitle];
+        self.recordingContent = [self stringArgumentAtIndex:1
+                                                    command:command
+                                                   fallback:self.recordingContent];
+        self.screenshotsBlocked = YES;
 
-    title = [command.arguments objectAtIndex:0];
-    content = [command.arguments objectAtIndex:1];
-    
-    stopRecording = true;
-    [self setupView];
-    preventedView = [[CustomView alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    preventedView.secureTextEntry = YES;
-    preventedView.translatesAutoresizingMaskIntoConstraints = YES;
-    
-    for (UIView *subview in preventedView.subviews) {
-        if ([NSStringFromClass([subview class]) containsString:@"CanvasView"]) {
-            secureView = subview;
-            secureView.frame = preventedView.frame;
-            secureView.userInteractionEnabled = YES;
-            secureView.translatesAutoresizingMaskIntoConstraints = NO;
-            
-            break;
+        NSString *errorMessage = nil;
+        if (![self applyWindowProtection:&errorMessage]) {
+            self.screenshotsBlocked = NO;
+            [self sendError:errorMessage command:command];
+            return;
+        }
+
+        [self setupView];
+        [self sendSuccessForCommand:command];
+    });
+}
+
+- (UIWindow *)activeWindow {
+    UIWindow *controllerWindow = self.viewController.view.window;
+    if (controllerWindow != nil) {
+        return controllerWindow;
+    }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+    if (keyWindow != nil) {
+        return keyWindow;
+    }
+
+    for (UIWindow *window in [UIApplication sharedApplication].windows) {
+        if (!window.hidden && window.alpha > 0.0) {
+            return window;
         }
     }
-    
-    [secureView addSubview:self.webView];
-    
-    [self.viewController.view addSubview:secureView];
 
-    [NSLayoutConstraint activateConstraints:@[
-        [secureView.topAnchor constraintEqualToAnchor:self.viewController.view.topAnchor],
-        [secureView.bottomAnchor constraintEqualToAnchor:self.viewController.view.bottomAnchor],
-        [secureView.leadingAnchor constraintEqualToAnchor:self.viewController.view.leadingAnchor],
-        [secureView.trailingAnchor constraintEqualToAnchor:self.viewController.view.trailingAnchor]
-    ]];
-    
-    // Below code to add it to front
-    [self.viewController.view bringSubviewToFront:self.webView];
-    [self.webView becomeFirstResponder];
+    return nil;
 }
 
-
--(void) goingBackground {
-    NSLog(@"Me la scattion in bck");
-    if(_eventCommand!=nil) {
-        CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"background"];
-        [pluginResult setKeepCallbackAsBool:YES];
-        [self.commandDelegate sendPluginResult:pluginResult callbackId:_eventCommand.callbackId];
-    }
-}
--(void)tookScreeshot {
-    NSLog(@"fatta la foto?");
-    if(_eventCommand!=nil) {
-        CDVPluginResult* pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:@"tookScreenshot"];
-        [pluginResult setKeepCallbackAsBool:YES];
-        [self.commandDelegate sendPluginResult:pluginResult callbackId:_eventCommand.callbackId];
+- (UIView *)secureCanvasInView:(UIView *)view {
+    if ([NSStringFromClass([view class]) containsString:@"CanvasView"]) {
+        return view;
     }
 
+    for (UIView *subview in view.subviews) {
+        UIView *canvas = [self secureCanvasInView:subview];
+        if (canvas != nil) {
+            return canvas;
+        }
+    }
+
+    return nil;
 }
 
--(void)setupView {
-    BOOL isCaptured = [[UIScreen mainScreen] isCaptured];
-    NSLog(@"Is screen captured? %@", (isCaptured?@"SI":@"NO"));
+- (BOOL)applyWindowProtection:(NSString **)errorMessage {
+    UIWindow *window = [self activeWindow];
+    if (window == nil) {
+        if (errorMessage != NULL) {
+            *errorMessage = @"Unable to find the active application window.";
+        }
+        return NO;
+    }
 
-    if ([[ScreenRecordingDetector sharedInstance] isRecording] && stopRecording) {
-        [self webView].alpha = 0.f;
+    if (self.protectedWindow == window && self.secureTextField != nil) {
+        return YES;
+    }
 
-//        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
-//                                                                       message:content
-//                                                                preferredStyle:UIAlertControllerStyleAlert];
-//
-//        UIAlertAction *ok = [UIAlertAction actionWithTitle:@"OK"
-//                                                     style:UIAlertActionStyleDefault
-//                                                   handler:nil];
-//
-//        [alert addAction:ok];
-//
-//        // Present the alert from your view controller
-//        [self.viewController presentViewController:alert animated:YES completion:nil];
+    [self restoreWindowProtection];
 
-        // Create the label
-        
-        NSString *notification = [NSString stringWithFormat:@"%@\n%@", title, content];
+    CALayer *originalSuperlayer = window.layer.superlayer;
+    if (originalSuperlayer == nil) {
+        if (errorMessage != NULL) {
+            *errorMessage = @"Unable to access the active window layer.";
+        }
+        return NO;
+    }
 
-        
-        stopRecordingLabel = [[UILabel alloc] init];
-        stopRecordingLabel.text = notification;
-        stopRecordingLabel.textColor = [UIColor blackColor];
-//        stopRecordingLabel.backgroundColor = [[UIColor whiteColor] colorWithAlphaComponent:0.7];
-        stopRecordingLabel.textAlignment = NSTextAlignmentCenter;
-        stopRecordingLabel.font = [UIFont boldSystemFontOfSize:14];
-        stopRecordingLabel.clipsToBounds = YES;
-        stopRecordingLabel.numberOfLines = 0;
-        
-        // Get the superview of the webView
-        UIView *parentView = self.webView.superview;
+    NSUInteger originalIndex = [originalSuperlayer.sublayers indexOfObject:window.layer];
+    if (originalIndex == NSNotFound) {
+        originalIndex = originalSuperlayer.sublayers.count;
+    }
 
-        CGFloat labelWidth = parentView.bounds.size.width - 60;
-        CGFloat labelHeight = parentView.bounds.size.height - 60;
+    UITextField *secureTextField = [[UITextField alloc] initWithFrame:window.bounds];
+    secureTextField.secureTextEntry = YES;
+    secureTextField.userInteractionEnabled = NO;
+    secureTextField.backgroundColor = [UIColor clearColor];
+    secureTextField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [window addSubview:secureTextField];
+    [secureTextField layoutIfNeeded];
 
-        // Center horizontally and vertically
-        CGFloat x = 30;
-        CGFloat y = 30;
+    UIView *secureCanvas = [self secureCanvasInView:secureTextField];
+    if (secureCanvas == nil) {
+        [secureTextField removeFromSuperview];
+        if (errorMessage != NULL) {
+            *errorMessage = @"Unable to initialize the secure iOS rendering surface.";
+        }
+        return NO;
+    }
 
-        stopRecordingLabel.frame = CGRectMake(x, y, labelWidth, labelHeight);
+    self.protectedWindow = window;
+    self.originalWindowSuperlayer = originalSuperlayer;
+    self.originalWindowLayerIndex = originalIndex;
+    self.secureTextField = secureTextField;
 
-        // Add to the main view above the webview
-        [self.webView.superview addSubview:stopRecordingLabel];
+    // Protect the entire UIWindow rather than only Cordova's WKWebView. The
+    // OutSystems OpenInWebView UIHostingController is presented in this window.
+    [secureTextField.layer removeFromSuperlayer];
+    [originalSuperlayer addSublayer:secureTextField.layer];
+    [secureCanvas.layer addSublayer:window.layer];
 
-        NSLog(@"Registro o prendo screenshots");
+    return YES;
+}
+
+- (void)restoreWindowProtection {
+    UIWindow *window = self.protectedWindow;
+    CALayer *originalSuperlayer = self.originalWindowSuperlayer;
+
+    if (window != nil && originalSuperlayer != nil) {
+        [window.layer removeFromSuperlayer];
+        NSUInteger layerCount = originalSuperlayer.sublayers.count;
+        if (self.originalWindowLayerIndex <= layerCount) {
+            [originalSuperlayer insertSublayer:window.layer
+                                      atIndex:(unsigned int)self.originalWindowLayerIndex];
+        } else {
+            [originalSuperlayer addSublayer:window.layer];
+        }
+    }
+
+    [self.secureTextField removeFromSuperview];
+    [self.secureTextField.layer removeFromSuperlayer];
+    self.secureTextField = nil;
+    self.protectedWindow = nil;
+    self.originalWindowSuperlayer = nil;
+    self.originalWindowLayerIndex = 0;
+}
+
+- (NSString *)stringArgumentAtIndex:(NSUInteger)index
+                            command:(CDVInvokedUrlCommand *)command
+                           fallback:(NSString *)fallback {
+    if (command.arguments.count <= index) {
+        return fallback;
+    }
+
+    id value = command.arguments[index];
+    if ([value isKindOfClass:[NSString class]] && [value length] > 0) {
+        return value;
+    }
+
+    return fallback;
+}
+
+- (void)sendSuccessForCommand:(CDVInvokedUrlCommand *)command {
+    CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                                               messageAsString:@"Success"];
+    [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
+}
+
+- (void)sendError:(NSString *)message command:(CDVInvokedUrlCommand *)command {
+    NSString *safeMessage = message ?: @"Unable to update screenshot protection.";
+    CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                                               messageAsString:safeMessage];
+    [self.commandDelegate sendPluginResult:result callbackId:command.callbackId];
+}
+
+- (void)goingBackground {
+    if (_eventCommand != nil) {
+        CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                                                   messageAsString:@"background"];
+        [result setKeepCallbackAsBool:YES];
+        [self.commandDelegate sendPluginResult:result callbackId:_eventCommand.callbackId];
+    }
+}
+
+- (void)tookScreenshot {
+    if (_eventCommand != nil) {
+        CDVPluginResult *result = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK
+                                                   messageAsString:@"tookScreenshot"];
+        [result setKeepCallbackAsBool:YES];
+        [self.commandDelegate sendPluginResult:result callbackId:_eventCommand.callbackId];
+    }
+}
+
+- (void)setupView {
+    BOOL isRecording = [[ScreenRecordingDetector sharedInstance] isRecording];
+    if (isRecording && self.screenshotsBlocked) {
+        UIWindow *window = [self activeWindow];
+        if (window == nil) {
+            return;
+        }
+
+        [self removeRecordingOverlay];
+        NSString *notification = [NSString stringWithFormat:@"%@\n%@",
+                                  self.recordingTitle,
+                                  self.recordingContent];
+
+        UILabel *label = [[UILabel alloc] initWithFrame:window.bounds];
+        label.text = notification;
+        label.textColor = [UIColor blackColor];
+        label.backgroundColor = [UIColor whiteColor];
+        label.textAlignment = NSTextAlignmentCenter;
+        label.font = [UIFont boldSystemFontOfSize:14];
+        label.numberOfLines = 0;
+        label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [window addSubview:label];
+        [window bringSubviewToFront:label];
+        self.stopRecordingLabel = label;
     } else {
-        if (stopRecordingLabel) {
-            [stopRecordingLabel removeFromSuperview];
-            stopRecordingLabel = nil;
-        }
-        [self webView].alpha = 1.f;
-        NSLog(@"Non registro");
-
+        [self removeRecordingOverlay];
     }
-    
-
 }
 
--(void)appDidBecomeActive {
+- (void)removeRecordingOverlay {
+    [self.stopRecordingLabel removeFromSuperview];
+    self.stopRecordingLabel = nil;
+}
+
+- (void)appDidBecomeActive {
     [ScreenRecordingDetector triggerDetectorTimer];
-    if(cover!=nil) {
-        [cover removeFromSuperview];
-        cover = nil;
+    [self.cover removeFromSuperview];
+    self.cover = nil;
+
+    if (self.screenshotsBlocked) {
+        NSString *errorMessage = nil;
+        if (![self applyWindowProtection:&errorMessage]) {
+            NSLog(@"ScreenshotBlocker could not restore window protection: %@", errorMessage);
+        }
+        [self setupView];
     }
 }
--(void)applicationWillResignActive {
+
+- (void)applicationWillResignActive {
     [ScreenRecordingDetector stopDetectorTimer];
-    if (cover == nil) {
-        CGRect screenBounds = [UIScreen mainScreen].bounds;
-        UIView *overlayView = [[UIView alloc] initWithFrame:screenBounds];
-        overlayView.backgroundColor = [UIColor whiteColor];
-        overlayView.alpha = 0.0;
-        overlayView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        cover = [[UIImageView alloc] initWithFrame:screenBounds];
-        [cover addSubview:overlayView];
-        [self.webView addSubview:cover];
-        [UIView animateWithDuration:0.5
-                         animations:^{
-                             overlayView.alpha = 0.95;
-                         }];
+    if (!self.screenshotsBlocked || self.cover != nil) {
+        return;
     }
+
+    UIWindow *window = [self activeWindow];
+    if (window == nil) {
+        return;
+    }
+
+    UIImageView *cover = [[UIImageView alloc] initWithFrame:window.bounds];
+    cover.backgroundColor = [UIColor whiteColor];
+    cover.alpha = 0.0;
+    cover.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [window addSubview:cover];
+    [window bringSubviewToFront:cover];
+    self.cover = cover;
+
+    [UIView animateWithDuration:0.2 animations:^{
+        cover.alpha = 0.95;
+    }];
 }
 
--(void)screenCaptureStatusChanged {
-    [self setupView];
+- (void)screenCaptureStatusChanged {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self setupView];
+    });
 }
 
-@end
-
-@implementation CustomView
-
-// Allow this view to become the first responder
-- (BOOL)canBecomeFirstResponder {
-    return YES;
-}
-
-// Called when the view becomes the first responder
-- (BOOL)becomeFirstResponder {
-    return YES;
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 @end
